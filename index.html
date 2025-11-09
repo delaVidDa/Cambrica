@@ -1,0 +1,821 @@
+import React, { useReducer, useEffect, useMemo, useCallback, useState, useRef } from 'react';
+import { Eye, Shield, Book, Scroll, Map, Settings, Download, Upload, Search, X, Check, AlertCircle, ChevronRight, Play, Edit, Trash2, Plus, Zap, Lock } from 'lucide-react';
+
+// Imports de utilidades y juegos (asegúrate de tener estos archivos)
+import { normalizeExport, genSessionId, exportToClipboard, applyFlagsToState } from './utils';
+import ObservadorGame from './games/ObservadorGame';
+import ExploracionGame from './games/ExploracionGame';
+import CombateGame from './games/CombateGame';
+import PuzzleGame from './games/PuzzleGame';
+
+// CONSTANTES
+const GAME_VERSION = '2.0.0';
+const STORAGE_KEY = 'civilizacion_v2';
+const MAX_CONNECTIONS = 5;
+
+const CHARACTERS = {
+  energy: { id: 'energy', name: 'ENERGÍA', subtitle: 'Consciencia', color: 'from-purple-500 to-pink-500', image: '👁️' },
+  body: { id: 'body', name: 'CUERPO', subtitle: 'Masculino', color: 'from-blue-500 to-cyan-500', image: '🛡️' },
+  mind: { id: 'mind', name: 'MENTE', subtitle: 'Femenino', color: 'from-pink-500 to-rose-500', image: '📖' },
+  narrator: { id: 'narrator', name: 'NARRADOR', subtitle: 'La Voz Omnisciente', color: 'from-amber-500 to-orange-500', image: '📜', locked: true }
+};
+
+const SCENE_TYPES = {
+  CHOICE: { name: 'Elige tu Aventura', emoji: '🔀' },
+  EXPLORATION: { name: 'Exploración', emoji: '🔍' },
+  PUZZLE: { name: 'Puzzle', emoji: '🧩' },
+  COMBAT: { name: 'Combate', emoji: '⚔️' },
+  DIALOGUE: { name: 'Diálogo', emoji: '💬' }
+};
+
+const ARTIFACTS = [
+  { id: 'decision_tree', name: 'Árbol de Decisiones', icon: '🌳' },
+  { id: 'sound_exploration', name: 'Exploración Sonora', icon: '🔊' },
+  { id: 'pattern_match', name: 'Coincidencia de Patrones', icon: '🎯' },
+  { id: 'turn_based_combat', name: 'Combate por Turnos', icon: '⚔️' },
+  { id: 'structural_puzzle', name: 'Estructura', icon: '🏗️' }
+];
+
+// GENERAR ESCENAS
+const generateScenes = () => {
+  const scenes = [];
+  const types = ['CHOICE', 'EXPLORATION', 'PUZZLE', 'COMBAT', 'DIALOGUE'];
+  const characters = ['energy', 'body', 'mind', 'narrator'];
+  
+  let sceneId = 1;
+  characters.forEach((charId) => {
+    for (let sceneNum = 1; sceneNum <= 25; sceneNum++) {
+      const typeIndex = (sceneNum - 1) % 5;
+      scenes.push({
+        id: sceneId,
+        characterId: charId,
+        type: types[typeIndex],
+        sceneNumber: sceneNum,
+        title: `${CHARACTERS[charId].name} - Capítulo ${sceneNum}`,
+        description: `Escena ${sceneNum} del personaje ${CHARACTERS[charId].name}`,
+        connections: sceneId < 100 ? [sceneId + 1] : [],
+        gameArtifact: null,
+        completed: false,
+        visitCount: 0
+      });
+      sceneId++;
+    }
+  });
+  return scenes;
+};
+
+// ACTIONS
+const ACTIONS = {
+  NAVIGATE: 'NAVIGATE',
+  SELECT_CHARACTER: 'SELECT_CHARACTER',
+  SET_CURRENT_SCENE: 'SET_CURRENT_SCENE',
+  COMPLETE_SCENE: 'COMPLETE_SCENE',
+  UPDATE_CONNECTIONS: 'UPDATE_CONNECTIONS',
+  ASSIGN_ARTIFACT: 'ASSIGN_ARTIFACT',
+  SET_SCENES: 'SET_SCENES',
+  SET_NOTIFICATION: 'SET_NOTIFICATION',
+  CLEAR_NOTIFICATION: 'CLEAR_NOTIFICATION',
+  SET_SEARCH: 'SET_SEARCH',
+  // Nuevas acciones para interoperabilidad
+  IMPORT_SESSION: 'IMPORT_SESSION',
+  APPEND_FLAGS: 'APPEND_FLAGS',
+  SET_EXTERNAL_SESSION: 'SET_EXTERNAL_SESSION'
+};
+
+const initialState = {
+  ui: { screen: 'orientation', notification: null },
+  game: { selectedCharacter: null, currentScene: null, scenes: generateScenes(), flags: [], externalSession: null },
+  filters: { search: '', characterFilter: 'all' }
+};
+
+const gameReducer = (state, action) => {
+  switch (action.type) {
+    case ACTIONS.NAVIGATE:
+      return { ...state, ui: { ...state.ui, screen: action.screen } };
+    case ACTIONS.SELECT_CHARACTER:
+      return { ...state, game: { ...state.game, selectedCharacter: action.characterId } };
+    case ACTIONS.SET_CURRENT_SCENE:
+      return { ...state, game: { ...state.game, currentScene: action.scene } };
+    case ACTIONS.COMPLETE_SCENE:
+      return {
+        ...state,
+        game: {
+          ...state.game,
+          scenes: state.game.scenes.map(s =>
+            s.id === action.sceneId ? { ...s, completed: true, visitCount: s.visitCount + 1 } : s
+          )
+        }
+      };
+    case ACTIONS.UPDATE_CONNECTIONS:
+      return {
+        ...state,
+        game: {
+          ...state.game,
+          scenes: state.game.scenes.map(s =>
+            s.id === action.sceneId ? { ...s, connections: action.connections } : s
+          )
+        }
+      };
+    case ACTIONS.ASSIGN_ARTIFACT:
+      return {
+        ...state,
+        game: {
+          ...state.game,
+          scenes: state.game.scenes.map(s =>
+            s.id === action.sceneId ? { ...s, gameArtifact: action.artifactId } : s
+          )
+        }
+      };
+    case ACTIONS.SET_SCENES:
+      return { ...state, game: { ...state.game, scenes: action.scenes } };
+    case ACTIONS.SET_NOTIFICATION:
+      return { ...state, ui: { ...state.ui, notification: action.notification } };
+    case ACTIONS.CLEAR_NOTIFICATION:
+      return { ...state, ui: { ...state.ui, notification: null } };
+    case ACTIONS.SET_SEARCH:
+      return { ...state, filters: { ...state.filters, search: action.search } };
+
+    // IMPORT_SESSION: guarda una sesión externa importada
+    case ACTIONS.IMPORT_SESSION:
+      return {
+        ...state,
+        game: {
+          ...state.game,
+          externalSession: action.payload
+        },
+        ui: { ...state.ui, notification: { type: 'success', message: 'Sesión importada' } }
+      };
+
+    // APPEND_FLAGS: añade flags globales sin duplicados
+    case ACTIONS.APPEND_FLAGS:
+      return {
+        ...state,
+        game: {
+          ...state.game,
+          flags: Array.from(new Set([...(state.game.flags || []), ...(action.flags || [])]))
+        },
+        ui: { ...state.ui, notification: { type: 'info', message: `Flags añadidos: ${action.flags?.length || 0}` } }
+      };
+
+    case ACTIONS.SET_EXTERNAL_SESSION:
+      return {
+        ...state,
+        game: { ...state.game, externalSession: action.payload }
+      };
+
+    default:
+      return state;
+  }
+};
+
+// SceneView integrado (montaje dinámico de artefactos)
+const ARTIFACT_COMPONENTS = {
+  decision_tree: ObservadorGame,
+  sound_exploration: ExploracionGame,
+  turn_based_combat: CombateGame,
+  structural_puzzle: PuzzleGame
+};
+
+function SceneView({ scene, externalSession, globalFlags = [], onExportToHost }) {
+  if (!scene) return <div className="p-6 text-gray-300">Selecciona una escena</div>;
+  const ArtifactComponent = scene.gameArtifact ? ARTIFACT_COMPONENTS[scene.gameArtifact] : null;
+
+  const handleExport = (payload) => {
+    try {
+      const normalized = normalizeExport({ ...payload, nodoActual: scene.id, juego: payload.juego || scene.title });
+      onExportToHost && onExportToHost(normalized);
+    } catch (e) {
+      console.error('SceneView export error', e);
+    }
+  };
+
+  return (
+    <div className="bg-gray-800 rounded-lg p-6">
+      <h2 className="text-white font-bold mb-2">{scene.title}</h2>
+      <p className="text-gray-400 mb-4">{scene.description}</p>
+
+      {ArtifactComponent ? (
+        <ArtifactComponent
+          scene={scene}
+          externalSession={externalSession}
+          globalFlags={globalFlags}
+          onExport={handleExport}
+        />
+      ) : (
+        <div className="text-gray-500">No hay juego asignado a esta escena</div>
+      )}
+    </div>
+  );
+}
+
+// Hook puente entre SceneView y reducer
+function useSceneBridge(dispatch) {
+  const onExportToHost = useCallback((normalized) => {
+    try {
+      const key = `${STORAGE_KEY}:${normalized.sessionId}`;
+      localStorage.setItem(key, JSON.stringify(normalized));
+      // añadir flags globales
+      if (normalized.flags && normalized.flags.length) {
+        dispatch({ type: ACTIONS.APPEND_FLAGS, flags: normalized.flags });
+      }
+      // guardar session en state
+      dispatch({ type: ACTIONS.IMPORT_SESSION, payload: normalized });
+      dispatch({ type: ACTIONS.SET_NOTIFICATION, notification: { type: 'success', message: `Exportado: ${normalized.juego}` } });
+    } catch (e) {
+      console.error('onExportToHost error', e);
+      dispatch({ type: ACTIONS.SET_NOTIFICATION, notification: { type: 'error', message: 'Error al procesar export' } });
+    }
+  }, [dispatch]);
+
+  return { onExportToHost };
+}
+
+// COMPONENTE PRINCIPAL
+export default function CivilizacionEscondida() {
+  const [state, dispatch] = useReducer(gameReducer, initialState);
+  const [editingScene, setEditingScene] = useState(null);
+  const [newConnection, setNewConnection] = useState('');
+  const { onExportToHost } = useSceneBridge(dispatch);
+  const onExportRef = useRef(onExportToHost);
+  onExportRef.current = onExportToHost;
+
+  // Persistencia: cargar escenas guardadas si existen
+  useEffect(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try {
+        const data = JSON.parse(saved);
+        if (Array.isArray(data.scenes)) {
+          dispatch({ type: ACTIONS.SET_SCENES, scenes: data.scenes });
+        }
+      } catch (err) {
+        console.error('Error restaurando escenas:', err);
+      }
+    } else {
+      // Inicializar (modo dev): asignar artefactos a las primeras 4 escenas si no hay data previa
+      const initialScenes = state.game.scenes.slice();
+      if (initialScenes[0] && !initialScenes[0].gameArtifact) {
+        initialScenes[0].gameArtifact = 'decision_tree';
+        if (initialScenes[1]) initialScenes[1].gameArtifact = 'sound_exploration';
+        if (initialScenes[2]) initialScenes[2].gameArtifact = 'turn_based_combat';
+        if (initialScenes[3]) initialScenes[3].gameArtifact = 'structural_puzzle';
+        dispatch({ type: ACTIONS.SET_SCENES, scenes: initialScenes });
+      }
+    }
+    // eslint-disable-next-line
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ scenes: state.game.scenes }));
+  }, [state.game.scenes]);
+
+  useEffect(() => {
+    if (state.ui.notification) {
+      const timer = setTimeout(() => dispatch({ type: ACTIONS.CLEAR_NOTIFICATION }), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [state.ui.notification]);
+
+  // Helpers
+  const notify = useCallback((message, type = 'info') => {
+    dispatch({ type: ACTIONS.SET_NOTIFICATION, notification: { message, type } });
+  }, []);
+
+  const getProgress = useCallback((charId) => {
+    const charScenes = state.game.scenes.filter(s => s.characterId === charId);
+    const completed = charScenes.filter(s => s.completed).length;
+    return charScenes.length ? Math.round((completed / charScenes.length) * 100) : 0;
+  }, [state.game.scenes]);
+
+  const getGlobalProgress = useCallback(() => {
+    const completed = state.game.scenes.filter(s => s.completed).length;
+    return state.game.scenes.length ? Math.round((completed / state.game.scenes.length) * 100) : 0;
+  }, [state.game.scenes]);
+
+  const scenesMap = useMemo(() => {
+    return state.game.scenes.reduce((acc, scene) => {
+      acc[scene.id] = scene;
+      return acc;
+    }, {});
+  }, [state.game.scenes]);
+
+  const filteredScenes = useMemo(() => {
+    return state.game.scenes.filter(s => {
+      const searchLower = state.filters.search.toLowerCase();
+      return state.filters.search === '' ||
+        s.title.toLowerCase().includes(searchLower) ||
+        s.id.toString().includes(searchLower);
+    });
+  }, [state.game.scenes, state.filters.search]);
+
+  const completeScene = useCallback((sceneId) => {
+    dispatch({ type: ACTIONS.COMPLETE_SCENE, sceneId });
+    notify('¡Escena completada!', 'success');
+  }, [notify]);
+
+  const updateConnections = useCallback((sceneId, connections) => {
+    if (connections.length > MAX_CONNECTIONS) {
+      notify(`Máximo ${MAX_CONNECTIONS} conexiones`, 'error');
+      return;
+    }
+    dispatch({ type: ACTIONS.UPDATE_CONNECTIONS, sceneId, connections });
+    notify('Conexiones actualizadas', 'success');
+  }, [notify]);
+
+  const assignArtifact = useCallback((sceneId, artifactId) => {
+    dispatch({ type: ACTIONS.ASSIGN_ARTIFACT, sceneId, artifactId });
+    notify('Artefacto asignado', 'success');
+  }, [notify]);
+
+  const exportData = useCallback(() => {
+    const data = JSON.stringify({
+      version: GAME_VERSION,
+      scenes: state.game.scenes,
+      exported: Date.now()
+    }, null, 2);
+    const blob = new Blob([data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `civilizacion-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    notify('Datos exportados correctamente', 'success');
+  }, [state.game.scenes, notify]);
+
+  const importData = useCallback((e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        try {
+          const data = JSON.parse(event.target.result);
+          if (data.scenes) {
+            dispatch({ type: ACTIONS.SET_SCENES, scenes: data.scenes });
+            notify('Datos importados correctamente', 'success');
+          } else {
+            notify('Archivo inválido', 'error');
+          }
+        } catch (err) {
+          notify('Error al importar archivo', 'error');
+        }
+      };
+      reader.readAsText(file);
+    }
+  }, [notify]);
+
+  // onExportToHost local wrapper para pasar a SceneView
+  const handleExportToHost = useCallback((normalized) => {
+    // usa la función del hook (mantiene dispatch y notificaciones)
+    onExportRef.current && onExportRef.current(normalized);
+  }, []);
+
+  // Notificación
+  const NotificationDisplay = state.ui.notification && (
+    <div className={`fixed top-4 right-4 px-6 py-4 rounded-lg shadow-2xl flex items-center gap-3 z-50 ${
+      state.ui.notification.type === 'success' ? 'bg-green-600' :
+      state.ui.notification.type === 'error' ? 'bg-red-600' : 'bg-blue-600'
+    }`}>
+      {state.ui.notification.type === 'success' && <Check className="w-5 h-5" />}
+      {state.ui.notification.type === 'error' && <X className="w-5 h-5" />}
+      <span className="font-semibold">{state.ui.notification.message}</span>
+    </div>
+  );
+
+  // Vistas principales
+  // PANTALLA: ORIENTACIÓN
+  if (state.ui.screen === 'orientation') {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white p-8 flex items-center justify-center">
+        {NotificationDisplay}
+        <div className="max-w-2xl text-center space-y-8">
+          <div className="text-9xl mb-6">👁️</div>
+          <h1 className="text-6xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
+            Civilización Escondida
+          </h1>
+          <p className="text-3xl text-purple-300 italic">"Una fantasía muy real"</p>
+          
+          <button
+            onClick={() => dispatch({ type: ACTIONS.NAVIGATE, screen: 'menu' })}
+            className="w-full px-8 py-5 bg-gradient-to-r from-purple-600 to-pink-600 rounded-xl font-bold text-2xl hover:from-purple-500 hover:to-pink-500 transition-all"
+          >
+            🎮 Iniciar Aventura
+          </button>
+          
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              onClick={() => dispatch({ type: ACTIONS.NAVIGATE, screen: 'map' })}
+              className="px-6 py-4 bg-slate-800 rounded-xl hover:bg-slate-700 transition-all flex flex-col items-center gap-2"
+            >
+              <Map className="w-6 h-6" />
+              <span>Mapa</span>
+            </button>
+            <button
+              onClick={() => dispatch({ type: ACTIONS.NAVIGATE, screen: 'editor' })}
+              className="px-6 py-4 bg-slate-800 rounded-xl hover:bg-slate-700 transition-all flex flex-col items-center gap-2"
+            >
+              <Edit className="w-6 h-6" />
+              <span>Editor</span>
+            </button>
+          </div>
+          
+          <div className="pt-6 border-t border-slate-700">
+            <div className="text-lg mb-2">Progreso Global: {getGlobalProgress()}%</div>
+            <div className="w-full bg-slate-800 rounded-full h-3">
+              <div 
+                className="bg-gradient-to-r from-purple-500 to-pink-500 h-3 rounded-full transition-all"
+                style={{ width: `${getGlobalProgress()}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  
+  // PANTALLA: MENÚ
+  if (state.ui.screen === 'menu') {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white p-8">
+        {NotificationDisplay}
+        <button
+          onClick={() => dispatch({ type: ACTIONS.NAVIGATE, screen: 'orientation' })}
+          className="mb-6 px-6 py-3 bg-slate-800 rounded-xl hover:bg-slate-700 transition-all"
+        >
+          ← Volver
+        </button>
+        
+        <h2 className="text-5xl font-bold text-center mb-12">Selecciona tu Camino</h2>
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-6xl mx-auto">
+          {Object.values(CHARACTERS).map(char => {
+            const progress = getProgress(char.id);
+            const isLocked = char.locked && !(['energy', 'body', 'mind'].every(id => getProgress(id) === 100));
+            
+            return (
+              <button
+                key={char.id}
+                onClick={() => {
+                  if (!isLocked) {
+                    dispatch({ type: ACTIONS.SELECT_CHARACTER, characterId: char.id });
+                    dispatch({ type: ACTIONS.NAVIGATE, screen: 'game' });
+                    const firstScene = state.game.scenes.find(s => s.characterId === char.id && s.sceneNumber === 1);
+                    dispatch({ type: ACTIONS.SET_CURRENT_SCENE, scene: firstScene });
+                  }
+                }}
+                disabled={isLocked}
+                className={`relative p-8 rounded-2xl bg-gradient-to-br ${char.color} ${
+                  isLocked ? 'opacity-50' : 'hover:scale-105'
+                } transition-all shadow-2xl`}
+              >
+                <div className="text-8xl mb-6">{char.image}</div>
+                <h3 className="text-4xl font-bold mb-3">{char.name}</h3>
+                <p className="text-xl opacity-90 mb-6">{char.subtitle}</p>
+                
+                <div className="space-y-3">
+                  <div className="flex justify-between text-lg">
+                    <span>Progreso</span>
+                    <span>{progress}%</span>
+                  </div>
+                  <div className="w-full bg-white/20 rounded-full h-3">
+                    <div 
+                      className="bg-white h-3 rounded-full transition-all"
+                      style={{ width: `${progress}%` }}
+                    />
+                  </div>
+                </div>
+                
+                {isLocked && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/70 rounded-2xl">
+                    <div className="text-center p-6">
+                      <Lock className="w-16 h-16 mb-4 mx-auto" />
+                      <div className="text-2xl font-bold">Bloqueado</div>
+                      <div className="text-sm">Completa los otros 3 personajes</div>
+                    </div>
+                  </div>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+  
+  // PANTALLA: JUEGO
+  if (state.ui.screen === 'game' && state.game.currentScene) {
+    const scene = state.game.currentScene;
+    const char = CHARACTERS[scene.characterId];
+    const sceneType = SCENE_TYPES[scene.type];
+    const nextScenes = state.game.scenes.filter(s => scene.connections.includes(s.id));
+    const artifact = ARTIFACTS.find(a => a.id === scene.gameArtifact);
+    
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 text-white">
+        {NotificationDisplay}
+        
+        <div className={`bg-gradient-to-r ${char.color} p-6`}>
+          <div className="max-w-7xl mx-auto flex items-center justify-between">
+            <div className="flex items-center gap-6">
+              <div className="text-5xl">{char.image}</div>
+              <div>
+                <h3 className="text-2xl font-bold">{char.name}</h3>
+                <p className="text-lg">Capítulo {scene.sceneNumber}/25</p>
+              </div>
+            </div>
+            <button
+              onClick={() => dispatch({ type: ACTIONS.NAVIGATE, screen: 'menu' })}
+              className="px-6 py-3 bg-black/30 rounded-lg hover:bg-black/50 transition-all"
+            >
+              Menú
+            </button>
+          </div>
+        </div>
+        
+        <div className="p-8 max-w-7xl mx-auto space-y-8">
+          <div className="bg-slate-800 p-8 rounded-2xl">
+            <h2 className="text-4xl font-bold mb-4">{scene.title}</h2>
+            <p className="text-xl text-slate-300 mb-4">{scene.description}</p>
+            <div className="flex gap-4 text-sm">
+              <span>{sceneType.emoji} {sceneType.name}</span>
+              <span>👁️ {scene.visitCount} visitas</span>
+            </div>
+          </div>
+          
+          <div className="bg-slate-800/50 border-4 border-dashed border-slate-600 p-10 rounded-2xl min-h-80 flex items-center justify-center">
+            {artifact ? (
+              <div className="text-center">
+                <div className="text-8xl mb-4">{artifact.icon}</div>
+                <h3 className="text-3xl font-bold">{artifact.name}</h3>
+              </div>
+            ) : (
+              <div className="text-center text-slate-500">
+                <div className="text-6xl mb-4">📦</div>
+                <p className="text-2xl">Sin artefacto</p>
+              </div>
+            )}
+          </div>
+          
+          <div className="space-y-4">
+            {!scene.completed && (
+              <button
+                onClick={() => completeScene(scene.id)}
+                className="w-full px-8 py-5 bg-green-600 hover:bg-green-500 rounded-xl font-bold text-xl flex items-center justify-center gap-3"
+              >
+                <Check className="w-7 h-7" />
+                Completar Escena
+              </button>
+            )}
+            
+            {nextScenes.map(next => (
+              <button
+                key={next.id}
+                onClick={() => dispatch({ type: ACTIONS.SET_CURRENT_SCENE, scene: next })}
+                className="w-full px-6 py-4 bg-slate-700 hover:bg-slate-600 rounded-xl flex items-center justify-between"
+              >
+                <span>{next.title}</span>
+                <ChevronRight className="w-7 h-7" />
+              </button>
+            ))}
+          </div>
+
+          {/* SceneView: monta el juego si hay artefacto */}
+          <div>
+            <SceneView
+              scene={scene}
+              externalSession={state.game.externalSession}
+              globalFlags={state.game.flags || []}
+              onExportToHost={handleExportToHost}
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
+  
+  // PANTALLA: MAPA
+  if (state.ui.screen === 'map') {
+    return (
+      <div className="min-h-screen bg-slate-900 text-white p-8">
+        {NotificationDisplay}
+        <div className="max-w-7xl mx-auto">
+          <div className="flex items-center justify-between mb-8">
+            <h2 className="text-4xl font-bold">Mapa de Escenas</h2>
+            <button
+              onClick={() => dispatch({ type: ACTIONS.NAVIGATE, screen: 'orientation' })}
+              className="px-6 py-3 bg-slate-800 rounded-xl hover:bg-slate-700"
+            >
+              ← Volver
+            </button>
+          </div>
+          
+          <div className="bg-slate-800 p-6 rounded-2xl mb-8">
+            <div className="relative">
+              <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-6 h-6 text-slate-400" />
+              <input
+                type="text"
+                value={state.filters.search}
+                onChange={(e) => dispatch({ type: ACTIONS.SET_SEARCH, search: e.target.value })}
+                placeholder="Buscar..."
+                className="w-full pl-14 pr-6 py-4 bg-slate-700 rounded-xl text-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+              />
+            </div>
+          </div>
+          
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            {filteredScenes.map(scene => {
+              const char = CHARACTERS[scene.characterId];
+              return (
+                <button
+                  key={scene.id}
+                  onClick={() => {
+                    dispatch({ type: ACTIONS.SET_CURRENT_SCENE, scene });
+                    dispatch({ type: ACTIONS.SELECT_CHARACTER, characterId: scene.characterId });
+                    dispatch({ type: ACTIONS.NAVIGATE, screen: 'game' });
+                  }}
+                  className={`p-5 rounded-xl bg-gradient-to-br ${char.color} ${
+                    scene.completed ? 'ring-2 ring-green-500' : ''
+                  } hover:scale-105 transition-all text-left shadow-lg`}
+                >
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-4xl">{char.image}</span>
+                    {scene.completed && <Check className="w-6 h-6 text-green-400" />}
+                  </div>
+                  <div className="text-xs opacity-75 mb-2">#{scene.id}</div>
+                  <h3 className="font-bold text-base">{scene.title}</h3>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  }
+  
+  // PANTALLA: EDITOR
+  if (state.ui.screen === 'editor') {
+    return (
+      <div className="min-h-screen bg-slate-900 text-white p-8">
+        {NotificationDisplay}
+        <div className="max-w-7xl mx-auto">
+          <div className="flex items-center justify-between mb-8">
+            <h2 className="text-4xl font-bold">Editor</h2>
+            <div className="flex gap-3">
+              <button
+                onClick={exportData}
+                className="px-5 py-3 bg-slate-800 rounded-xl hover:bg-slate-700 transition-all flex items-center gap-2 border-2 border-slate-700"
+              >
+                <Download className="w-5 h-5" />
+                Exportar
+              </button>
+              <label className="px-5 py-3 bg-slate-800 rounded-xl hover:bg-slate-700 transition-all flex items-center gap-2 cursor-pointer border-2 border-slate-700">
+                <Upload className="w-5 h-5" />
+                Importar
+                <input type="file" accept=".json" onChange={importData} className="hidden" />
+              </label>
+              <button
+                onClick={() => dispatch({ type: ACTIONS.NAVIGATE, screen: 'orientation' })}
+                className="px-6 py-3 bg-slate-800 rounded-xl hover:bg-slate-700 border-2 border-slate-700"
+              >
+                ← Volver
+              </button>
+            </div>
+          </div>
+          
+          {/* Panel de Estadísticas */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+            <div className="bg-gradient-to-br from-slate-800 to-slate-700 p-6 rounded-xl border-2 border-slate-600">
+              <div className="flex items-center gap-3">
+                <div className="text-4xl">📊</div>
+                <div>
+                  <div className="text-3xl font-bold">{state.game.scenes.length}</div>
+                  <div className="text-sm text-slate-400">Total Escenas</div>
+                </div>
+              </div>
+            </div>
+            
+            <div className="bg-gradient-to-br from-green-900 to-green-800 p-6 rounded-xl border-2 border-green-500">
+              <div className="flex items-center gap-3">
+                <div className="text-4xl">✅</div>
+                <div>
+                  <div className="text-3xl font-bold text-green-400">
+                    {state.game.scenes.filter(s => s.completed).length}
+                  </div>
+                  <div className="text-sm text-slate-400">Completadas</div>
+                </div>
+              </div>
+            </div>
+            
+            <div className="bg-gradient-to-br from-purple-900 to-purple-800 p-6 rounded-xl border-2 border-purple-500">
+              <div className="flex items-center gap-3">
+                <div className="text-4xl">🎮</div>
+                <div>
+                  <div className="text-3xl font-bold text-purple-400">
+                    {state.game.scenes.filter(s => s.gameArtifact).length}
+                  </div>
+                  <div className="text-sm text-slate-400">Con Artefacto</div>
+                </div>
+              </div>
+            </div>
+            
+            <div className="bg-gradient-to-br from-amber-900 to-amber-800 p-6 rounded-xl border-2 border-amber-500">
+              <div className="flex items-center gap-3">
+                <div className="text-4xl">🔗</div>
+                <div>
+                  <div className="text-3xl font-bold text-amber-400">
+                    {state.game.scenes.reduce((sum, s) => sum + s.connections.length, 0)}
+                  </div>
+                  <div className="text-sm text-slate-400">Conexiones</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <div className="space-y-4">
+            {state.game.scenes.map(scene => {
+              const char = CHARACTERS[scene.characterId];
+              const isEditing = editingScene?.id === scene.id;
+              
+              return (
+                <div key={scene.id} className="bg-slate-800 rounded-xl border-2 border-slate-700">
+                  <div 
+                    className="p-5 flex items-center justify-between cursor-pointer hover:bg-slate-750"
+                    onClick={() => setEditingScene(isEditing ? null : scene)}
+                  >
+                    <div className="flex items-center gap-4">
+                      <span className="text-4xl">{char.image}</span>
+                      <div>
+                        <h3 className="font-bold text-lg">#{scene.id} - {scene.title}</h3>
+                      </div>
+                    </div>
+                    <ChevronRight className={`w-6 h-6 transition-transform ${isEditing ? 'rotate-90' : ''}`} />
+                  </div>
+                  
+                  {isEditing && (
+                    <div className="p-6 border-t-2 border-slate-700 space-y-6">
+                      <div>
+                        <h4 className="font-bold mb-3">Conexiones</h4>
+                        {scene.connections.map(connId => (
+                          <div key={connId} className="flex items-center justify-between bg-slate-700 p-3 rounded-lg mb-2">
+                            <span>#{connId}</span>
+                            <button
+                              onClick={() => updateConnections(scene.id, scene.connections.filter(c => c !== connId))}
+                              className="p-1 hover:bg-red-600 rounded"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                        ))}
+                        <div className="flex gap-2 mt-2">
+                          <input
+                            type="number"
+                            value={newConnection}
+                            onChange={(e) => setNewConnection(e.target.value)}
+                            placeholder="ID..."
+                            className="flex-1 px-3 py-2 bg-slate-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                          />
+                          <button
+                            onClick={() => {
+                              const id = parseInt(newConnection);
+                              if (id >= 1 && id <= 100) {
+                                updateConnections(scene.id, [...scene.connections, id]);
+                                setNewConnection('');
+                              }
+                            }}
+                            className="px-4 py-2 bg-purple-600 rounded-lg"
+                          >
+                            <Plus className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                      
+                      <div>
+                        <h4 className="font-bold mb-3">Artefactos</h4>
+                        <div className="grid grid-cols-2 gap-2">
+                          {ARTIFACTS.map(artifact => (
+                            <button
+                              key={artifact.id}
+                              onClick={() => assignArtifact(scene.id, artifact.id)}
+                              className={`p-3 rounded-lg ${
+                                scene.gameArtifact === artifact.id ? 'bg-purple-600' : 'bg-slate-700'
+                              }`}
+                            >
+                              <div className="text-3xl">{artifact.icon}</div>
+                              <div className="text-xs">{artifact.name}</div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  }
+  
+  return null;
+}
